@@ -35,9 +35,12 @@ dependencies = [
     "accelerate>=0.33",
     "safetensors>=0.4",
 
-    # UI
+    # UI (TUI + GUI)
     "textual>=0.79",
     "rich>=13.7",
+    "customtkinter>=5.2",
+    "psutil>=5.9",
+    "pynvml>=11.5; sys_platform != 'darwin'",
 
     # Config / logging
     "pydantic>=2.8",
@@ -58,6 +61,7 @@ dev = [
 
 [project.scripts]
 transcriber = "transcriber.__main__:main"
+transcriber-gui = "transcriber.__main__:main_gui"
 transcriber-capture-test = "transcriber.audio.capture:cli_record_test"
 
 [tool.setuptools.packages.find]

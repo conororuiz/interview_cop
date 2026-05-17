@@ -22,6 +22,9 @@ safetensors>=0.4
 
 textual>=0.79
 rich>=13.7
+customtkinter>=5.2
+psutil>=5.9
+pynvml>=11.5; sys_platform != "darwin"
 
 pydantic>=2.8
 pydantic-settings>=2.4

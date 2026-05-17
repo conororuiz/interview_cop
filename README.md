@@ -74,15 +74,33 @@ python scripts\doctor.py
 
 ## Uso
 
-### Modo en vivo (TUI)
+### Modo GUI (ventana flotante translúcida) — recomendado
 
 ```powershell
-transcriber                # arranca la interfaz
+transcriber-gui            # ventana Qt frameless con efecto cristal
+# o equivalente:
+transcriber --gui
+```
+
+Características de la GUI:
+- Ventana **frameless** con efecto cristal oscuro (dark glass).
+- **Redimensionable** desde cualquier borde o esquina.
+- **Arrastrable** desde la barra de título.
+- **Slider de opacidad** en vivo (60-100%).
+- **Pin** para mantener siempre encima.
+- Dos paneles separados: **Original** (texto fuente) y **Español** (traducción).
+- Cada panel muestra los segmentos finales + un **caption en vivo** en itálica/gris que se actualiza cada 1.5s mientras el speaker habla.
+- Strip inferior con métricas en tiempo real: segmentos, RTF, latencia E2E, **uso de CPU**, **uso de GPU**, y **VRAM** usada/total.
+
+### Modo TUI (terminal)
+
+```powershell
+transcriber                # TUI Textual en terminal
 transcriber --debug        # logs DEBUG a logs/transcriber.log
 transcriber --no-translate # transcribe pero no traduce
 ```
 
-Atajos:
+Atajos TUI:
 - `q` — salir
 - `c` — limpiar transcripción
 

@@ -46,6 +46,15 @@ log = logging.getLogger(__name__)
 # --- Event types pushed to UI ---
 
 @dataclass
+class EvtLoading:
+    """Progress messages while heavy models load. The bridge thread emits these
+    BEFORE EvtSystemReady so the GUI can show a meaningful loading screen."""
+    stage: str        # "vad" | "whisper" | "translator" | "capture"
+    message: str
+    progress: float   # 0..1, best effort
+
+
+@dataclass
 class EvtSystemReady:
     device: DeviceInfo
     accel: AccelProfile
@@ -104,7 +113,8 @@ class EvtError:
 
 
 Event = (
-    EvtSystemReady
+    EvtLoading
+    | EvtSystemReady
     | EvtAudioLevel
     | EvtSegmentDetected
     | EvtPreviewTranscript
@@ -119,8 +129,18 @@ class Orchestrator:
     def __init__(
         self,
         translator: Optional[Callable[[str, str], str]] = None,
+        translator_factory: Optional[Callable[[], Callable[[str, str], str]]] = None,
         target_lang: str = "es",
     ):
+        """
+        Args:
+            translator: a ready-to-use translation callable. Avoid for GUIs —
+                use `translator_factory` so loading happens in the background.
+            translator_factory: a zero-arg callable returning a translation
+                callable. Called from the bridge thread during `start()`, so
+                the main thread is never blocked by NLLB load.
+            target_lang: ISO 639-1 of the target language. Defaults to "es".
+        """
         s = get_settings()
         self._settings = s
         self._accel = detect_accel()
@@ -128,6 +148,7 @@ class Orchestrator:
         self._segmenter: Segmenter | None = None
         self._whisper: WhisperEngine | None = None
         self._translator = translator
+        self._translator_factory = translator_factory
         self._target_lang = target_lang
 
         # Queues
@@ -166,7 +187,24 @@ class Orchestrator:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
-        await asyncio.to_thread(self._init_models)
+        await self._emit(EvtLoading(stage="vad",
+                                     message="Cargando VAD (Silero)...", progress=0.05))
+        await asyncio.to_thread(self._load_vad)
+
+        await self._emit(EvtLoading(stage="whisper",
+                                     message=f"Cargando Whisper {self._settings.whisper_model} (CUDA float16)...",
+                                     progress=0.20))
+        await asyncio.to_thread(self._load_whisper)
+
+        if self._translator is None and self._translator_factory is not None:
+            await self._emit(EvtLoading(stage="translator",
+                                         message="Cargando traductor NLLB-200 1.3B (~5 GB)...",
+                                         progress=0.55))
+            await asyncio.to_thread(self._load_translator)
+
+        await self._emit(EvtLoading(stage="capture",
+                                     message="Abriendo dispositivo de audio...",
+                                     progress=0.92))
         self._init_capture()
         self._start_workers()
         await self._emit(EvtSystemReady(
@@ -199,10 +237,21 @@ class Orchestrator:
 
     # --- helpers ---
 
-    def _init_models(self) -> None:
-        self._whisper = WhisperEngine(accel=self._accel)
+    def _load_vad(self) -> None:
         vad = SileroVAD()
         self._segmenter = Segmenter(vad)
+
+    def _load_whisper(self) -> None:
+        self._whisper = WhisperEngine(accel=self._accel)
+
+    def _load_translator(self) -> None:
+        if self._translator_factory is None:
+            return
+        try:
+            self._translator = self._translator_factory()
+        except Exception as e:
+            log.exception("Translator factory failed: %s", e)
+            self._translator = None
 
     def _init_capture(self) -> None:
         cfg = CaptureConfig(
@@ -227,13 +276,13 @@ class Orchestrator:
         self._t_preview = threading.Thread(
             target=self._preview_loop, name="asr-preview", daemon=True,
         )
-        self._t_translation = threading.Thread(
-            target=self._translation_loop, name="translation", daemon=True,
-        )
         self._t_capture_pump.start()
         self._t_segmenter.start()
         self._t_asr.start()
         if self._translator is not None:
+            self._t_translation = threading.Thread(
+                target=self._translation_loop, name="translation", daemon=True,
+            )
             self._t_translation.start()
         if self._settings.preview_enabled:
             self._t_preview.start()
