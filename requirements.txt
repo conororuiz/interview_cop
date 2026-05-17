@@ -1,0 +1,29 @@
+# Generated from pyproject.toml. Install with:
+#   pip install -r requirements.txt
+# For CUDA acceleration on Windows/Linux, install the CUDA-enabled torch wheel
+# *first* via scripts/install_windows.ps1 or scripts/install_linux.sh.
+
+sounddevice>=0.4.7
+soundfile>=0.12.1
+numpy>=1.26,<3
+PyAudioWPatch>=0.2.12.7; sys_platform == "win32"
+
+onnxruntime>=1.18
+torch>=2.3
+silero-vad>=5.1
+
+faster-whisper>=1.0.3
+ctranslate2>=4.4
+
+transformers>=4.44
+sentencepiece>=0.2.0
+accelerate>=0.33
+safetensors>=0.4
+
+textual>=0.79
+rich>=13.7
+
+pydantic>=2.8
+pydantic-settings>=2.4
+python-dotenv>=1.0
+tqdm>=4.66

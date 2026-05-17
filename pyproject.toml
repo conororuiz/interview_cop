@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realtime-transcriber"
+version = "0.1.0"
+description = "Real-time system-audio transcription and translation to Spanish with Whisper + NLLB."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "conoro" }]
+
+# Core deps. Platform-specific audio backends are guarded with markers.
+dependencies = [
+    # Audio I/O
+    "sounddevice>=0.4.7",
+    "soundfile>=0.12.1",
+    "numpy>=1.26,<3",
+    # Windows WASAPI loopback (only on Windows)
+    "PyAudioWPatch>=0.2.12.7; sys_platform == 'win32'",
+
+    # VAD
+    "onnxruntime>=1.18",        # CPU runtime
+    "silero-vad>=5.1",          # official Silero VAD package (v5)
+    "torch>=2.3",               # required by faster-whisper + NLLB; CUDA wheel installed via script
+
+    # ASR
+    "faster-whisper>=1.0.3",
+    "ctranslate2>=4.4",
+
+    # Translation
+    "transformers>=4.44",
+    "sentencepiece>=0.2.0",
+    "accelerate>=0.33",
+    "safetensors>=0.4",
+
+    # UI
+    "textual>=0.79",
+    "rich>=13.7",
+
+    # Config / logging
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "python-dotenv>=1.0",
+
+    # Utilities
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+transcriber = "transcriber.__main__:main"
+transcriber-capture-test = "transcriber.audio.capture:cli_record_test"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

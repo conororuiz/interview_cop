@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Project-local artefacts
+models/
+logs/
+segments/
+capture_test.wav
+*.wav
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Env / config
+.env
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
