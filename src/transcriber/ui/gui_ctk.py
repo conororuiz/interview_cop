@@ -36,6 +36,10 @@ import tkinter as tk
 
 from ..hardware.monitor import HardwareMonitor
 from ..pipeline.orchestrator import (
+    EvtAiResponseDelta,
+    EvtAiResponseDone,
+    EvtAiResponseError,
+    EvtAiResponseStart,
     EvtAudioLevel,
     EvtError,
     EvtLoading,
@@ -348,6 +352,138 @@ class TranscriptPanel(ctk.CTkFrame):
         self._current_preview_seg = None
 
 
+class AiResponsePanel(ctk.CTkFrame):
+    """Panel that displays the streamed Gemini answer. Includes the trigger
+    button and a 'detected question' line shown above the response body."""
+
+    def __init__(self, master, on_respond: Callable[[], None]):
+        super().__init__(master, fg_color=C_PANEL, corner_radius=10,
+                          border_width=1, border_color=C_BORDER)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        head = ctk.CTkFrame(self, fg_color="transparent", height=30)
+        head.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
+        head.grid_columnconfigure(2, weight=1)
+
+        tag = ctk.CTkLabel(head, text="TU RESPUESTA",
+                            font=("Segoe UI", 9, "bold"),
+                            text_color="#c084fc")
+        tag.grid(row=0, column=0, sticky="w")
+        sub = ctk.CTkLabel(head, text=" · Lo que dirías como entrevistado",
+                            font=("Segoe UI", 9), text_color=C_TEXT_MUTED)
+        sub.grid(row=0, column=1, sticky="w")
+
+        self._respond_btn = ctk.CTkButton(
+            head, text="✨  Responder", width=130, height=26,
+            fg_color="#a855f7", hover_color="#c084fc", text_color="#fff",
+            command=on_respond,
+        )
+        self._respond_btn.grid(row=0, column=3, sticky="e")
+
+        self._text = ctk.CTkTextbox(
+            self, fg_color=C_PANEL_LIGHT, text_color=C_TEXT,
+            border_width=0, corner_radius=8, wrap="word",
+            font=FONT_BODY,
+        )
+        self._text.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+
+        t: tk.Text = self._text._textbox
+        t.tag_configure("placeholder", foreground=C_TEXT_MUTED,
+                         font=("Segoe UI", 11, "italic"))
+        t.tag_configure("ts", foreground=C_TEXT_MUTED, font=FONT_TS)
+        t.tag_configure("q", foreground="#c084fc", font=("Segoe UI", 10, "italic"))
+        t.tag_configure("body", foreground=C_TEXT, font=FONT_BODY)
+        t.tag_configure("err", foreground=C_DANGER, font=FONT_BOLD)
+        t.tag_configure("meta", foreground=C_TEXT_MUTED, font=FONT_SMALL)
+        self._t = t
+
+        self._show_placeholder()
+        self._text.configure(state="disabled")
+        self._current_request_id: int | None = None
+
+    # --- API
+
+    def set_button_enabled(self, enabled: bool, label: str | None = None) -> None:
+        if enabled:
+            self._respond_btn.configure(state="normal",
+                                         text=label or "✨  Responder")
+        else:
+            self._respond_btn.configure(state="disabled",
+                                         text=label or "Sin API key")
+
+    def begin_response(self, request_id: int, question: str | None,
+                        language: str) -> None:
+        self._current_request_id = request_id
+        self._with_edit(lambda: self._do_begin(question, language))
+        self._respond_btn.configure(state="disabled", text="Pensando…")
+
+    def append_delta(self, request_id: int, delta: str) -> None:
+        if request_id != self._current_request_id:
+            return
+        self._with_edit(lambda: self._do_append_body(delta))
+
+    def finish_response(self, request_id: int, seconds: float) -> None:
+        if request_id != self._current_request_id:
+            return
+        self._with_edit(lambda: self._do_append_meta(f"  ({seconds:.1f}s)"))
+        self._respond_btn.configure(state="normal", text="✨  Responder")
+
+    def fail_response(self, request_id: int, message: str) -> None:
+        self._with_edit(lambda: self._do_append_error(message))
+        self._respond_btn.configure(state="normal", text="✨  Responder")
+
+    def clear_all(self) -> None:
+        self._with_edit(self._show_placeholder)
+        self._current_request_id = None
+
+    # --- internals
+
+    def _with_edit(self, fn: Callable[[], None]) -> None:
+        self._text.configure(state="normal")
+        try:
+            fn()
+        finally:
+            self._text.configure(state="disabled")
+
+    def _show_placeholder(self) -> None:
+        self._t.delete("1.0", "end")
+        self._t.insert("1.0",
+                        "Modo entrevista: pulsa “Responder” y Gemini te sugerirá, "
+                        "en primera persona y en el idioma del audio, lo que "
+                        "dirías como entrevistado.",
+                        ("placeholder",))
+
+    def _do_begin(self, question: str | None, language: str) -> None:
+        if self._t.get("1.0", "end").strip().startswith("Pulsa"):
+            self._t.delete("1.0", "end")
+        ts = datetime.now().strftime("%H:%M:%S")
+        if self._t.index("end-1c") != "1.0":
+            self._t.insert("end", "\n")
+        self._t.insert("end", f"\n{ts}  ", ("ts",))
+        self._t.insert("end", f"[{language.upper()}] ", ("meta",))
+        if question:
+            self._t.insert("end", f"\n  ❓ {question}\n", ("q",))
+        else:
+            self._t.insert("end",
+                            "\n  (sin pregunta explícita — respondo de forma "
+                            "natural al contexto reciente)\n",
+                            ("meta",))
+        self._t.see("end")
+
+    def _do_append_body(self, delta: str) -> None:
+        self._t.insert("end", delta, ("body",))
+        self._t.see("end")
+
+    def _do_append_meta(self, meta: str) -> None:
+        self._t.insert("end", meta, ("meta",))
+        self._t.see("end")
+
+    def _do_append_error(self, msg: str) -> None:
+        self._t.insert("end", f"\n⚠ {msg}\n", ("err",))
+        self._t.see("end")
+
+
 class MetricsStrip(ctk.CTkFrame):
     """Bottom row: counters + CPU/GPU/VRAM + clear button."""
 
@@ -573,8 +709,10 @@ class TranscriberApp:
 
         self._live = ctk.CTkFrame(self._content, fg_color="transparent")
         self._live.grid_columnconfigure(0, weight=1)
-        self._live.grid_rowconfigure(1, weight=1)
-        self._live.grid_rowconfigure(2, weight=1)
+        # Three panels share remaining vertical space evenly (weights 2/2/2).
+        self._live.grid_rowconfigure(1, weight=2)
+        self._live.grid_rowconfigure(2, weight=2)
+        self._live.grid_rowconfigure(3, weight=2)
         # NOT gridded yet — we swap into place when EvtSystemReady arrives.
 
         self._status = StatusStrip(self._live)
@@ -585,17 +723,22 @@ class TranscriberApp:
             accent=C_ACCENT,
             placeholder="Esperando audio… reproduce algo para empezar.",
         )
-        self._src_panel.grid(row=1, column=0, sticky="nsew", pady=(4, 4))
+        self._src_panel.grid(row=1, column=0, sticky="nsew", pady=(4, 3))
 
         self._tgt_panel = TranscriptPanel(
             self._live, title="Español", subtitle="Traducción automática",
             accent=C_OK,
             placeholder="La traducción aparecerá aquí cuando el idioma no sea español.",
         )
-        self._tgt_panel.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
+        self._tgt_panel.grid(row=2, column=0, sticky="nsew", pady=(3, 3))
+
+        self._ai_panel = AiResponsePanel(
+            self._live, on_respond=self._on_respond_clicked,
+        )
+        self._ai_panel.grid(row=3, column=0, sticky="nsew", pady=(3, 0))
 
         self._metrics = MetricsStrip(self._live, on_clear=self._on_clear)
-        self._metrics.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        self._metrics.grid(row=4, column=0, sticky="ew", pady=(6, 0))
 
         # --- Wire orchestrator thread --------------------------------------
         self._orch = orchestrator
@@ -640,7 +783,27 @@ class TranscriberApp:
     def _on_clear(self) -> None:
         self._src_panel.clear_all()
         self._tgt_panel.clear_all()
+        self._ai_panel.clear_all()
         self._metrics.reset_counters()
+        # Critical: also wipe the orchestrator's transcript history so the
+        # next AI request only sees what arrives FROM NOW ON. Without this
+        # Gemini would still be answering based on segments the user can no
+        # longer see.
+        try:
+            self._orch.clear_history()
+        except Exception as e:
+            log.debug("clear_history failed: %s", e)
+
+    def _on_respond_clicked(self) -> None:
+        # Re-check availability at click time — the responder is built lazily
+        # in the bridge thread, so it might not yet exist at first launch.
+        if not self._orch.ai_available:
+            self._ai_panel.fail_response(
+                -1, "Gemini no está disponible. Define GEMINI_API_KEY en .env y reinicia.",
+            )
+            self._ai_panel.set_button_enabled(False, "Sin API key")
+            return
+        self._orch.request_ai_response()
 
     def _poll_hardware(self) -> None:
         try:
@@ -669,6 +832,13 @@ class TranscriberApp:
                                     f"{ev.accel.ct2_device}/{ev.accel.ct2_compute_type}")
             self._subtitle.configure(text=f"escuchando {ev.device.name}")
             self._swap_to_live()
+            # Reflect AI availability in the button state.
+            if self._orch.ai_available:
+                self._ai_panel.set_button_enabled(True, "✨  Responder")
+            else:
+                self._ai_panel.set_button_enabled(
+                    False, "Sin API key (Gemini)",
+                )
             return
         if isinstance(ev, EvtAudioLevel):
             try:
@@ -700,6 +870,19 @@ class TranscriberApp:
                 tr_seconds=tr.asr_seconds, audio_seconds=tr.duration_s,
                 rtf=tr.rtf, latency=ev.end_to_end_latency_s,
             )
+            return
+        if isinstance(ev, EvtAiResponseStart):
+            self._ai_panel.begin_response(ev.request_id, ev.detected_question,
+                                            ev.language)
+            return
+        if isinstance(ev, EvtAiResponseDelta):
+            self._ai_panel.append_delta(ev.request_id, ev.delta)
+            return
+        if isinstance(ev, EvtAiResponseDone):
+            self._ai_panel.finish_response(ev.request_id, ev.seconds)
+            return
+        if isinstance(ev, EvtAiResponseError):
+            self._ai_panel.fail_response(ev.request_id, ev.message)
             return
         if isinstance(ev, EvtError):
             ts = datetime.now().strftime("%H:%M:%S")

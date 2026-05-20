@@ -23,15 +23,18 @@ without dropping the segmenter / ASR threads.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import queue
 import threading
 import time
-from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Optional
+from collections import deque
+from dataclasses import dataclass, field
+from typing import AsyncIterator, Callable, Iterator, Optional
 
 import numpy as np
 
+from ..ai.gemini_engine import AiPromptContext, GeminiResponder, detect_question
 from ..asr.whisper_engine import Transcript, WhisperEngine
 from ..audio.capture import AudioCapture, CaptureChunk, CaptureConfig, DeviceInfo
 from ..audio.device_picker import select_capture_backend
@@ -107,6 +110,32 @@ class EvtTranscript:
 
 
 @dataclass
+class EvtAiResponseStart:
+    request_id: int
+    detected_question: Optional[str]
+    language: str
+
+
+@dataclass
+class EvtAiResponseDelta:
+    request_id: int
+    delta: str             # incremental text chunk
+
+
+@dataclass
+class EvtAiResponseDone:
+    request_id: int
+    full_text: str
+    seconds: float
+
+
+@dataclass
+class EvtAiResponseError:
+    request_id: int
+    message: str
+
+
+@dataclass
 class EvtError:
     message: str
     fatal: bool = False
@@ -119,8 +148,21 @@ Event = (
     | EvtSegmentDetected
     | EvtPreviewTranscript
     | EvtTranscript
+    | EvtAiResponseStart
+    | EvtAiResponseDelta
+    | EvtAiResponseDone
+    | EvtAiResponseError
     | EvtError
 )
+
+
+@dataclass
+class _TranscriptRecord:
+    """One finalised transcript kept in the AI context history."""
+    text: str
+    translation: Optional[str]
+    language: str
+    monotonic_time: float
 
 
 # --- Orchestrator ---
@@ -157,6 +199,7 @@ class Orchestrator:
         # Translation runs on its own worker so ASR can start the NEXT segment
         # while NLLB is still busy. Item: (segment, transcript, queued_at).
         self._trans_q: queue.Queue[tuple[AudioSegment, "Transcript", float]] = queue.Queue(maxsize=32)
+        self._ai_q: queue.Queue[int] = queue.Queue(maxsize=8)   # carries request_ids
         self._event_q: asyncio.Queue[Event] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -167,6 +210,14 @@ class Orchestrator:
         self._t_capture_pump: threading.Thread | None = None
         self._t_preview: threading.Thread | None = None
         self._t_translation: threading.Thread | None = None
+        self._t_ai: threading.Thread | None = None
+
+        # AI responder (lazy: built on first request if not provided).
+        self._ai_responder: GeminiResponder | None = None
+        # History of finalised transcripts for AI context.
+        self._history: deque[_TranscriptRecord] = deque(maxlen=64)
+        self._history_lock = threading.Lock()
+        self._ai_request_counter = itertools.count(1)
 
         # Single mutex around the Whisper model so finals and previews don't
         # run concurrently. faster-whisper is thread-safe but we still want
@@ -221,9 +272,55 @@ class Orchestrator:
             except Exception as e:  # pragma: no cover
                 log.warning("Error stopping capture: %s", e)
         for t in (self._t_capture_pump, self._t_segmenter, self._t_asr,
-                  self._t_preview, self._t_translation):
+                  self._t_preview, self._t_translation, self._t_ai):
             if t is not None:
                 t.join(timeout=2.0)
+
+    # --- AI responder public API ---
+
+    @property
+    def ai_available(self) -> bool:
+        return self._ai_responder is not None and self._ai_responder.is_available
+
+    def clear_history(self) -> None:
+        """Drop every stored transcript so the next AI request only sees what
+        arrives FROM NOW ON. Called by the GUI when the user clicks 'Limpiar'.
+
+        Also drains pending AI requests so a click queued just before clear
+        doesn't run against the about-to-be-discarded context.
+        """
+        with self._history_lock:
+            self._history.clear()
+        try:
+            while True:
+                self._ai_q.get_nowait()
+        except queue.Empty:
+            pass
+
+    def request_ai_response(self) -> int:
+        """Trigger an AI response over the current transcript history.
+
+        Returns the new request_id. The result will arrive as
+        `EvtAiResponseStart` → many `EvtAiResponseDelta` → `EvtAiResponseDone`
+        (or `EvtAiResponseError`) on the event queue, so any UI can subscribe.
+        Returns -1 if no AI backend is configured.
+        """
+        if not self.ai_available:
+            self._emit_threadsafe(EvtAiResponseError(
+                request_id=-1,
+                message="Gemini no está configurado. Define GEMINI_API_KEY en .env.",
+            ))
+            return -1
+        request_id = next(self._ai_request_counter)
+        try:
+            self._ai_q.put_nowait(request_id)
+        except queue.Full:
+            self._emit_threadsafe(EvtAiResponseError(
+                request_id=request_id,
+                message="Cola de IA llena; espera a que termine la respuesta anterior.",
+            ))
+            return -1
+        return request_id
 
     def events(self) -> AsyncIterator[Event]:
         async def gen():
@@ -252,6 +349,16 @@ class Orchestrator:
         except Exception as e:
             log.exception("Translator factory failed: %s", e)
             self._translator = None
+
+    def _ensure_ai_responder(self) -> None:
+        """Build the Gemini responder lazily. Safe to call repeatedly."""
+        if self._ai_responder is not None:
+            return
+        try:
+            self._ai_responder = GeminiResponder()
+        except Exception as e:
+            log.warning("Could not initialise Gemini responder: %s", e)
+            self._ai_responder = None
 
     def _init_capture(self) -> None:
         cfg = CaptureConfig(
@@ -286,6 +393,14 @@ class Orchestrator:
             self._t_translation.start()
         if self._settings.preview_enabled:
             self._t_preview.start()
+
+        # AI responder is built lazily, but the worker is always there so a
+        # request can be honoured (or rejected cleanly) without a race.
+        self._ensure_ai_responder()
+        self._t_ai = threading.Thread(
+            target=self._ai_worker_loop, name="ai-responder", daemon=True,
+        )
+        self._t_ai.start()
 
     # --- worker loops ---
 
@@ -385,6 +500,7 @@ class Orchestrator:
                 )
 
                 if not needs_translation:
+                    self._record_history(tr, translation=None)
                     self._emit_threadsafe(EvtTranscript(
                         transcript=tr, segment=seg, translation=None,
                         queued_at=queued_at, finished_at=time.monotonic(),
@@ -421,6 +537,7 @@ class Orchestrator:
                 log.exception("Translation failed: %s", e)
                 translation = f"[translation error: {e}]"
                 dt = 0.0
+            self._record_history(tr, translation=translation)
             self._emit_threadsafe(EvtTranscript(
                 transcript=tr, segment=seg, translation=translation,
                 queued_at=queued_at, finished_at=time.monotonic(),
@@ -491,6 +608,95 @@ class Orchestrator:
                 ))
             except Exception as e:
                 log.debug("Preview loop error (non-fatal): %s", e)
+
+    # --- history + AI worker
+
+    def _record_history(self, tr: Transcript, translation: Optional[str]) -> None:
+        if not tr.text:
+            return
+        with self._history_lock:
+            self._history.append(_TranscriptRecord(
+                text=tr.text,
+                translation=translation,
+                language=tr.language,
+                monotonic_time=time.monotonic(),
+            ))
+
+    def _build_ai_context(self) -> AiPromptContext:
+        s = self._settings
+        cutoff = time.monotonic() - s.ai_history_seconds
+        with self._history_lock:
+            recent = [r for r in self._history if r.monotonic_time >= cutoff]
+            if not recent and self._history:
+                # Fallback to the very last entry so we always have something.
+                recent = [self._history[-1]]
+        # Cap context length, keeping the MOST recent material.
+        joined_parts: list[str] = []
+        total = 0
+        for r in reversed(recent):
+            line = f"[{r.language}] {r.text}"
+            if total + len(line) + 1 > s.ai_max_context_chars:
+                break
+            joined_parts.append(line)
+            total += len(line) + 1
+        joined = "\n".join(reversed(joined_parts))
+
+        # Language for the response = language of the most recent transcript
+        # (the listener probably wants the answer in the speaker's tongue).
+        language = recent[-1].language if recent else self._settings.target_language
+
+        # Question detection scans the most recent transcripts first.
+        detected = None
+        for r in reversed(recent):
+            q = detect_question(r.text, r.language)
+            if q:
+                detected = q
+                break
+
+        return AiPromptContext(
+            transcript_recent=joined or "(no transcript yet)",
+            detected_question=detected,
+            language=language,
+        )
+
+    def _ai_worker_loop(self) -> None:
+        while not self._stop_evt.is_set():
+            try:
+                request_id = self._ai_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if self._ai_responder is None or not self._ai_responder.is_available:
+                self._emit_threadsafe(EvtAiResponseError(
+                    request_id=request_id,
+                    message="Gemini no está configurado. Define GEMINI_API_KEY en .env.",
+                ))
+                continue
+            try:
+                ctx = self._build_ai_context()
+                self._emit_threadsafe(EvtAiResponseStart(
+                    request_id=request_id,
+                    detected_question=ctx.detected_question,
+                    language=ctx.language,
+                ))
+                t0 = time.monotonic()
+                parts: list[str] = []
+                for delta in self._ai_responder.respond_streaming(ctx):
+                    if self._stop_evt.is_set():
+                        break
+                    parts.append(delta)
+                    self._emit_threadsafe(EvtAiResponseDelta(
+                        request_id=request_id, delta=delta,
+                    ))
+                full = "".join(parts)
+                self._emit_threadsafe(EvtAiResponseDone(
+                    request_id=request_id, full_text=full,
+                    seconds=time.monotonic() - t0,
+                ))
+            except Exception as e:
+                log.exception("AI worker failed: %s", e)
+                self._emit_threadsafe(EvtAiResponseError(
+                    request_id=request_id, message=str(e),
+                ))
 
     def _attempt_capture_recovery(self) -> None:
         """Reopen the capture stream with exponential backoff.

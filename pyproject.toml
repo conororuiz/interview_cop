@@ -49,6 +49,10 @@ dependencies = [
 
     # Utilities
     "tqdm>=4.66",
+
+    # AI responder (optional but recommended). Falls back gracefully when no
+    # API key is configured.
+    "google-generativeai>=0.8",
 ]
 
 [project.optional-dependencies]

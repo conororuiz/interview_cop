@@ -21,6 +21,19 @@ TranslationBackend = Literal["nllb-1.3b", "nllb-600m", "deepl"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# Eagerly load .env into os.environ so non-prefixed variables (GEMINI_API_KEY,
+# DEEPL_API_KEY, etc.) are visible to plain `os.getenv(...)` calls. Pydantic
+# itself ALSO reads .env, but only for its own prefixed Settings fields; the
+# AI module uses the unprefixed convention so we need this explicit load.
+try:
+    from dotenv import load_dotenv
+    _ENV_FILE = PROJECT_ROOT / ".env"
+    if _ENV_FILE.is_file():
+        load_dotenv(_ENV_FILE, override=False)
+except Exception:
+    # dotenv is optional — settings still work via real environment variables.
+    pass
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -62,6 +75,12 @@ class Settings(BaseSettings):
     translation_backend: TranslationBackend = "nllb-1.3b"
     target_language: str = "es"  # ISO 639-1
     deepl_api_key: str | None = None
+
+    # --- AI responder (Gemini) ---
+    # API key is read from the top-level GEMINI_API_KEY env var (not prefixed).
+    gemini_model: str = "gemini-2.5-flash"
+    ai_history_seconds: int = 60        # window of recent transcripts sent as context
+    ai_max_context_chars: int = 4000
 
     # --- Paths ---
     models_dir: Path = PROJECT_ROOT / "models"

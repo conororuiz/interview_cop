@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from typing import Callable  # noqa: F401  (used in type hint comment)
 
@@ -22,6 +23,27 @@ from .logging_setup import setup_logging
 from .pipeline.orchestrator import Orchestrator
 
 log = logging.getLogger(__name__)
+
+
+def _apply_cpu_mode(model_override: str | None = None,
+                     translator_override: str | None = None) -> None:
+    """Set env vars BEFORE settings are first read so the whole stack
+    reconfigures for CPU-only execution.
+
+    We also down-shift the default model sizes — large-v3 + NLLB-1.3B are
+    unusable on CPU. Users can still override via --whisper-model /
+    --translator or via the existing TRANSCRIBER_* env vars.
+    """
+    os.environ["TRANSCRIBER_COMPUTE_DEVICE"] = "cpu"
+    os.environ.setdefault("TRANSCRIBER_WHISPER_MODEL", model_override or "medium")
+    os.environ.setdefault("TRANSCRIBER_TRANSLATION_BACKEND",
+                            translator_override or "nllb-600m")
+    # Smaller models also benefit from a wider VAD window — speech detection
+    # is the same but ASR call cost is higher, so larger segments amortise
+    # the per-call overhead.
+    os.environ.setdefault("TRANSCRIBER_MAX_SEGMENT_MS", "12000")
+    os.environ.setdefault("TRANSCRIBER_PREVIEW_INTERVAL_MS", "3000")
+    os.environ.setdefault("TRANSCRIBER_PREVIEW_MIN_AUDIO_MS", "3000")
 
 
 def _build_orchestrator(no_translate: bool) -> Orchestrator:
@@ -41,6 +63,44 @@ def _build_orchestrator(no_translate: bool) -> Orchestrator:
     return Orchestrator(translator_factory=factory)
 
 
+def _add_common_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--cpu", action="store_true",
+                        help="Force CPU-only execution (simulates a machine "
+                             "without a GPU). Auto-downsizes models: Whisper "
+                             "medium + NLLB-600M.")
+    parser.add_argument("--whisper-model", type=str, default=None,
+                        help="Override Whisper model size "
+                             "(tiny / base / small / medium / large-v2 / large-v3).")
+    parser.add_argument("--translator", type=str, default=None,
+                        help="Override translation backend "
+                             "(nllb-1.3b / nllb-600m / deepl).")
+    parser.add_argument("--no-translate", action="store_true",
+                        help="Disable translation; transcribe only.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable DEBUG logging.")
+
+
+def _apply_common_flags(args: argparse.Namespace) -> None:
+    """Apply env-var-style overrides from CLI flags. Must run BEFORE the
+    settings cache is populated (i.e. before setup_logging / Orchestrator)."""
+    if args.debug:
+        os.environ.setdefault("TRANSCRIBER_LOG_LEVEL", "DEBUG")
+    if args.cpu:
+        _apply_cpu_mode(model_override=args.whisper_model,
+                          translator_override=args.translator)
+        log.warning(
+            "CPU mode enabled — using Whisper=%s and translator=%s "
+            "(set via --whisper-model / --translator to override).",
+            os.environ["TRANSCRIBER_WHISPER_MODEL"],
+            os.environ["TRANSCRIBER_TRANSLATION_BACKEND"],
+        )
+    else:
+        if args.whisper_model:
+            os.environ["TRANSCRIBER_WHISPER_MODEL"] = args.whisper_model
+        if args.translator:
+            os.environ["TRANSCRIBER_TRANSLATION_BACKEND"] = args.translator
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="transcriber",
@@ -50,15 +110,9 @@ def main() -> int:
                         help="Launch the lightweight CustomTkinter GUI.")
     parser.add_argument("--qt-gui", action="store_true",
                         help="Launch the heavier PySide6 GUI (experimental).")
-    parser.add_argument("--no-translate", action="store_true",
-                        help="Disable translation; transcribe only.")
-    parser.add_argument("--debug", action="store_true",
-                        help="Enable DEBUG logging to file.")
+    _add_common_flags(parser)
     args = parser.parse_args()
-
-    if args.debug:
-        import os
-        os.environ.setdefault("TRANSCRIBER_LOG_LEVEL", "DEBUG")
+    _apply_common_flags(args)
 
     if args.qt_gui:
         return _run_qt_gui(args.no_translate)
@@ -70,14 +124,12 @@ def main() -> int:
 def main_gui() -> int:
     """Console-script entry point for `transcriber-gui` — uses CustomTkinter."""
     parser = argparse.ArgumentParser(prog="transcriber-gui")
-    parser.add_argument("--no-translate", action="store_true")
-    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--qt", action="store_true",
                         help="Use the PySide6 build instead of CustomTkinter.")
+    _add_common_flags(parser)
     args = parser.parse_args()
-    if args.debug:
-        import os
-        os.environ.setdefault("TRANSCRIBER_LOG_LEVEL", "DEBUG")
+    _apply_common_flags(args)
+
     if args.qt:
         return _run_qt_gui(args.no_translate)
     return _run_ctk_gui(args.no_translate)

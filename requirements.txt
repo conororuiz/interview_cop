@@ -30,3 +30,4 @@ pydantic>=2.8
 pydantic-settings>=2.4
 python-dotenv>=1.0
 tqdm>=4.66
+google-generativeai>=0.8
