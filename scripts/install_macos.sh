@@ -40,4 +40,19 @@ pip install -r requirements.txt
 echo "==> Installing project in editable mode"
 pip install -e .
 
+# ---------------------------------------------------------------------------
+# Auto-configure .env for THIS machine (Apple Silicon -> MPS, else CPU tier)
+# ---------------------------------------------------------------------------
+echo
+echo "==> Auto-detecting hardware and writing .env"
+if ! python scripts/autoconfig.py; then
+    echo "(!) autoconfig failed but install completed; you can run it later:"
+    echo "    python scripts/autoconfig.py"
+fi
+
+echo
 echo "==> Done. Activate the venv with: source .venv/bin/activate"
+echo
+echo "Quick checks:"
+echo "  python scripts/doctor.py"
+echo "  transcriber-gui"

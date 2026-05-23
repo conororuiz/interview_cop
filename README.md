@@ -59,8 +59,52 @@ cd realtime-transcriber
 ./scripts/install_macos.sh
 ```
 
-Los scripts crean `.venv`, instalan PyTorch con CUDA 12.8 (Blackwell-compatible)
-y todas las dependencias, y dejan el paquete en modo editable.
+Los scripts crean `.venv`, instalan PyTorch con la **rueda correcta para tu
+máquina** (cu128 si detectan una GPU NVIDIA con `nvidia-smi`, CPU si no la hay),
+todas las dependencias, dejan el paquete en modo editable y al final ejecutan
+`scripts/autoconfig.py` para escribir un `.env` afinado al hardware del equipo.
+
+## Autoconfiguración del hardware
+
+Cada equipo es distinto. Para evitar que el primer arranque reviente por una
+configuración pensada para otra máquina, el instalador ejecuta al final
+**`scripts/autoconfig.py`**, que detecta:
+
+- Si hay GPU NVIDIA (vía `nvidia-smi`) y cuánta VRAM tiene.
+- Si es Apple Silicon (M1/M2/M3 → MPS).
+- La cantidad de RAM y de cores del CPU.
+
+…y escribe un `.env` con el modelo de Whisper, el backend de traducción,
+`compute_type` (fp16 / int8_fp16 / int8) y los tiempos de segmentación
+adecuados para ese tier:
+
+| Tier | Hardware típico | Whisper | NLLB | Compute | `MAX_SEGMENT_MS` |
+|---|---|---|---|---|---|
+| GPU-HIGH | ≥12 GB VRAM (RTX 5070/4090…) | large-v3 | 1.3B | float16 | 10000 |
+| GPU-UPPER-MID | 8-11 GB VRAM (RTX 3070/4060 Ti) | large-v3 | 1.3B | int8_float16 | 10000 |
+| GPU-MID | 6-7 GB VRAM (RTX 3060/4050) | medium | 1.3B | float16 | 10000 |
+| GPU-LOW | 4-5 GB VRAM | small | 600M | int8_float16 | 12000 |
+| GPU-VERY-LOW | 2-3 GB VRAM (GTX 1060 3GB) | small | 600M | int8 | 14000 |
+| APPLE-HIGH | M-series ≥16 GB | medium (MPS) | 1.3B | — | 12000 |
+| APPLE-LOW | M-series 8 GB | small (MPS) | 600M | — | 12000 |
+| CPU-HIGH | sin GPU, ≥16 GB RAM | medium | 600M | int8 | 12000 |
+| CPU-MID | sin GPU, 8-15 GB RAM | small | 600M | int8 | 12000 |
+| CPU-LOW | sin GPU, <8 GB RAM | base | 600M | int8 | 14000 |
+
+Puedes re-ejecutarlo manualmente cuando quieras (por ejemplo, después de
+cambiar de tarjeta gráfica):
+
+```powershell
+python scripts\autoconfig.py            # detecta y escribe .env
+python scripts\autoconfig.py --dry-run  # solo muestra el plan, no toca nada
+python scripts\autoconfig.py --force    # sobrescribe valores que tú hubieras puesto a mano
+python scripts\autoconfig.py --json     # salida machine-readable
+```
+
+Los valores existentes en `.env` se **respetan por defecto**: si tú fijaste
+`TRANSCRIBER_WHISPER_MODEL=large-v3`, el autoconfig no lo va a tocar a menos
+que uses `--force`. Las API keys (`GEMINI_API_KEY`, `DEEPL_API_KEY`) nunca
+las modifica.
 
 ## Pre-descarga de modelos (recomendado)
 
@@ -369,6 +413,7 @@ transcriber-gui          # CustomTkinter (no Qt)
 | 7 | GUI CustomTkinter (ligera) | ✅ |
 | 8 | Copiloto IA Gemini en modo entrevista | ✅ |
 | 9 | Modo `--cpu` para simular ejecución sin GPU | ✅ |
+| 10 | Autoconfig de hardware al instalar (tiers VRAM/RAM) | ✅ |
 
 ## Licencia
 
