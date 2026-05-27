@@ -26,14 +26,20 @@ python -m pip install --upgrade pip wheel setuptools
 
 # ---------------------------------------------------------------------------
 # GPU detection (BEFORE installing torch — picks the right wheel)
+# Three branches:
+#   1. NVIDIA found    -> cu128 wheels (full GPU acceleration)
+#   2. AMD/Radeon only -> CPU wheels (PyTorch ROCm has no Windows wheels and
+#                        faster-whisper/CTranslate2 has no ROCm backend
+#                        anywhere — so the only safe option is CPU torch).
+#   3. Nothing useful  -> CPU wheels.
 # ---------------------------------------------------------------------------
 $hasNvidia = $false
-$gpuInfo = ""
+$nvidiaInfo = ""
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 if ($nvidiaSmi) {
     try {
-        $gpuInfo = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null
-        if ($LASTEXITCODE -eq 0 -and $gpuInfo) {
+        $nvidiaInfo = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null
+        if ($LASTEXITCODE -eq 0 -and $nvidiaInfo) {
             $hasNvidia = $true
         }
     } catch {
@@ -41,16 +47,38 @@ if ($nvidiaSmi) {
     }
 }
 
+# AMD / Radeon detection via WMI (no separate tool needed on Windows).
+$hasAmd = $false
+$amdInfo = ""
+try {
+    $videoCtrls = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty Name
+    foreach ($n in $videoCtrls) {
+        if ($n -match "AMD|Radeon|ATI ") {
+            $hasAmd = $true
+            $amdInfo = $n
+            break
+        }
+    }
+} catch {
+    $hasAmd = $false
+}
+
 if ($hasNvidia) {
-    Write-Host "==> NVIDIA GPU detected: $gpuInfo" -ForegroundColor Green
+    Write-Host "==> NVIDIA GPU detected: $nvidiaInfo" -ForegroundColor Green
     Write-Host "==> Installing PyTorch with CUDA 12.8 wheels (Blackwell-compatible)" -ForegroundColor Cyan
     # cu128 is the minimum CUDA toolkit version that supports Blackwell GPUs
     # (RTX 50-series, sm_120). Older indexes like cu124/cu121 will fall back to
     # CPU on Blackwell and PyTorch won't see the GPU.
     pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio
+} elseif ($hasAmd) {
+    Write-Host "==> AMD GPU detected: $amdInfo" -ForegroundColor Yellow
+    Write-Host "    PyTorch ROCm has no Windows wheels and faster-whisper has no" -ForegroundColor Yellow
+    Write-Host "    ROCm backend — installing CPU torch instead (the app will work," -ForegroundColor Yellow
+    Write-Host "    just on CPU). Expect 5-10x slower transcription vs NVIDIA." -ForegroundColor Yellow
+    pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 } else {
-    Write-Host "==> No NVIDIA GPU detected (nvidia-smi missing or returned nothing)." -ForegroundColor Yellow
-    Write-Host "==> Installing PyTorch CPU wheels — no CUDA toolkit needed." -ForegroundColor Cyan
+    Write-Host "==> No discrete GPU detected — installing PyTorch CPU wheels." -ForegroundColor Yellow
     pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 }
 

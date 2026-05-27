@@ -32,22 +32,51 @@ pip install --upgrade pip wheel setuptools
 
 # ---------------------------------------------------------------------------
 # GPU detection (BEFORE installing torch — picks the right wheel)
+# Three branches:
+#   1. NVIDIA found    -> cu128 wheels (full GPU acceleration)
+#   2. AMD/Radeon only -> CPU wheels by default. PyTorch ROCm exists on Linux
+#                        but faster-whisper / CTranslate2 has no ROCm backend,
+#                        so Whisper would land on CPU anyway. We default to a
+#                        pure-CPU install to keep things bulletproof. Advanced
+#                        users on RDNA2+ can re-install torch with the ROCm
+#                        wheels later to accelerate NLLB only.
+#   3. Nothing useful  -> CPU wheels.
 # ---------------------------------------------------------------------------
 HAS_NVIDIA=0
-GPU_INFO=""
+NVIDIA_INFO=""
 if command -v nvidia-smi >/dev/null 2>&1; then
-    if GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null) && [ -n "$GPU_INFO" ]; then
+    if NVIDIA_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null) && [ -n "$NVIDIA_INFO" ]; then
         HAS_NVIDIA=1
     fi
 fi
 
+HAS_AMD=0
+AMD_INFO=""
+if command -v lspci >/dev/null 2>&1; then
+    # Vendor 1002 = AMD/ATI. Match VGA/Display/3D controllers only.
+    AMD_LINE=$(lspci -nn 2>/dev/null | grep -Ei 'vga|display|3d' | grep -i '\[1002:' | head -n1 || true)
+    if [ -n "$AMD_LINE" ]; then
+        HAS_AMD=1
+        # Extract human-readable name between the colon and the [1002:...] tag.
+        AMD_INFO=$(echo "$AMD_LINE" | sed -E 's/^[^:]+:\s*//; s/\s*\[1002:[^]]+\].*//')
+        [ -z "$AMD_INFO" ] && AMD_INFO="$AMD_LINE"
+    fi
+fi
+
 if [ "$HAS_NVIDIA" = "1" ]; then
-    echo "==> NVIDIA GPU detected: $GPU_INFO"
+    echo "==> NVIDIA GPU detected: $NVIDIA_INFO"
     echo "==> Installing PyTorch with CUDA 12.8 wheels (Blackwell-compatible)"
     pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio
+elif [ "$HAS_AMD" = "1" ]; then
+    echo "==> AMD GPU detected: $AMD_INFO"
+    echo "    faster-whisper has no ROCm backend, so Whisper runs on CPU regardless."
+    echo "    Installing PyTorch CPU wheels for a bulletproof setup."
+    echo "    (Advanced users on RDNA2+ can later reinstall torch with the ROCm 6.x"
+    echo "     wheels to accelerate NLLB only:"
+    echo "       pip install --index-url https://download.pytorch.org/whl/rocm6.2 torch torchaudio)"
+    pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 else
-    echo "==> No NVIDIA GPU detected (nvidia-smi missing or returned nothing)."
-    echo "==> Installing PyTorch CPU wheels — no CUDA toolkit needed."
+    echo "==> No discrete GPU detected — installing PyTorch CPU wheels."
     pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
 fi
 

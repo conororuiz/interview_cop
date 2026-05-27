@@ -71,6 +71,9 @@ configuración pensada para otra máquina, el instalador ejecuta al final
 **`scripts/autoconfig.py`**, que detecta:
 
 - Si hay GPU NVIDIA (vía `nvidia-smi`) y cuánta VRAM tiene.
+- Si hay GPU AMD/Radeon (vía `lspci` en Linux, `Get-CimInstance` en Windows,
+  o `rocm-smi` si está instalado) — y la nombra explícitamente aunque caiga
+  a CPU.
 - Si es Apple Silicon (M1/M2/M3 → MPS).
 - La cantidad de RAM y de cores del CPU.
 
@@ -87,9 +90,29 @@ adecuados para ese tier:
 | GPU-VERY-LOW | 2-3 GB VRAM (GTX 1060 3GB) | small | 600M | int8 | 14000 |
 | APPLE-HIGH | M-series ≥16 GB | medium (MPS) | 1.3B | — | 12000 |
 | APPLE-LOW | M-series 8 GB | small (MPS) | 600M | — | 12000 |
-| CPU-HIGH | sin GPU, ≥16 GB RAM | medium | 600M | int8 | 12000 |
-| CPU-MID | sin GPU, 8-15 GB RAM | small | 600M | int8 | 12000 |
-| CPU-LOW | sin GPU, <8 GB RAM | base | 600M | int8 | 14000 |
+| CPU-HIGH | AMD/Radeon o sin GPU, ≥16 GB RAM | medium | 600M | int8 | 12000 |
+| CPU-MID | AMD/Radeon o sin GPU, 8-15 GB RAM | small | 600M | int8 | 12000 |
+| CPU-LOW | AMD/Radeon o sin GPU, <8 GB RAM | base | 600M | int8 | 14000 |
+
+### ¿Por qué AMD/Radeon cae a CPU?
+
+faster-whisper (motor CTranslate2) sólo tiene backend CUDA — no existe
+build para ROCm. Aunque instaláramos PyTorch con ROCm en Linux, sólo se
+aceleraría NLLB (la traducción); Whisper seguiría en CPU. Además, ROCm
+oficialmente sólo soporta RDNA2 o superior (RX 6000+), así que una
+RX 5600 / 5700 (RDNA1), Polaris (RX 400/500) o Vega ni eso. Por eso el
+instalador detecta tu Radeon, te la muestra por su nombre en el reporte
+y elige el mejor tier CPU para tu RAM — no rompe la instalación.
+
+Si estás en Linux con una RX 6000/7000 y quieres acelerar NLLB
+manualmente:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/rocm6.2 torch torchaudio
+# luego en .env:
+#   TRANSCRIBER_COMPUTE_DEVICE=cuda    (ROCm se hace pasar por "cuda" en torch)
+# pero deja TRANSCRIBER_COMPUTE_TYPE=int8 para que Whisper siga funcionando en CPU
+```
 
 Puedes re-ejecutarlo manualmente cuando quieras (por ejemplo, después de
 cambiar de tarjeta gráfica):
